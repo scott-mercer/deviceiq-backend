@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import io
 import logging
+from typing import Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,9 +34,10 @@ REQUIRED_COLUMNS = {"device_model", "os_version", "usage_percent"}
 async def upload_csv(
     file: UploadFile = File(...),
     coverage_threshold: float = Query(90, ge=0, le=100, description="Cumulative coverage threshold (0-100)"),
+    group_by: Optional[str] = Query(None, description="Group devices by 'device_model', 'os_version', or 'os_major_version'"),
     api_key: str = Depends(verify_api_key)
 ):
-    logging.info(f"Received upload: {file.filename} with threshold {coverage_threshold}")
+    logging.info(f"Received upload: {file.filename} with threshold {coverage_threshold}, group_by={group_by}")
     try:
         content = await file.read()
         df = pd.read_csv(io.StringIO(content.decode("utf-8")))
@@ -58,11 +60,29 @@ async def upload_csv(
             detail="Column 'usage_percent' must be numeric."
         )
 
+    # Add os_major_version if needed for grouping
+    if group_by == "os_major_version":
+        df["os_major_version"] = df["os_version"].astype(str).str.split(".").str[0]
+
+    # Group if requested
+    if group_by in {"device_model", "os_version", "os_major_version"}:
+        group_cols = [group_by]
+        grouped = df.groupby(group_cols, as_index=False).agg({
+            "usage_percent": "sum"
+        })
+        # Optionally keep a representative os_version or device_model
+        if group_by == "device_model" and "os_version" in df.columns:
+            grouped["os_version"] = df.groupby(group_by)["os_version"].first().values
+        if group_by == "os_major_version" and "device_model" in df.columns:
+            grouped["device_model"] = df.groupby("os_major_version")["device_model"].first().values
+        df = grouped
+
+    # Greedy selection: sort and include up to threshold
     df = df.sort_values(by='usage_percent', ascending=False)
     df['cumulative_coverage'] = df['usage_percent'].cumsum()
     df['include_in_matrix'] = df['cumulative_coverage'] <= coverage_threshold
 
-    matrix = df[df["include_in_matrix"]][["device_model", "os_version", "usage_percent", "cumulative_coverage"]]
+    matrix = df[df["include_in_matrix"]][df.columns]
 
     # Summary statistics
     total_devices = len(df)
@@ -81,3 +101,45 @@ async def upload_csv(
     }
 
     return result
+
+@app.post("/analytics/")
+async def analytics(
+    file: UploadFile = File(...),
+    group_by: Optional[str] = Query(None, description="Group devices by 'device_model', 'os_version', or 'os_major_version'"),
+    api_key: str = Depends(verify_api_key)
+):
+    try:
+        content = await file.read()
+        df = pd.read_csv(io.StringIO(content.decode("utf-8")))
+    except Exception as e:
+        logging.error(f"Failed to read CSV: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read CSV file: {str(e)}")
+
+    # Add os_major_version if needed
+    if group_by == "os_major_version":
+        df["os_major_version"] = df["os_version"].astype(str).str.split(".").str[0]
+
+    # Group if requested
+    if group_by in {"device_model", "os_version", "os_major_version"}:
+        group_cols = [group_by]
+        grouped = df.groupby(group_cols, as_index=False).agg({
+            "usage_percent": "sum"
+        })
+        df = grouped
+
+    # Device/OS usage distribution
+    usage_distribution = df.sort_values(by='usage_percent', ascending=False).to_dict(orient="records")
+
+    # Cumulative coverage curve
+    df_sorted = df.sort_values(by='usage_percent', ascending=False)
+    df_sorted['cumulative_coverage'] = df_sorted['usage_percent'].cumsum()
+    cumulative_curve = df_sorted[['device_model', 'os_version', 'usage_percent', 'cumulative_coverage']].to_dict(orient="records")
+
+    # OS version breakdown
+    os_version_breakdown = df.groupby('os_version', as_index=False)['usage_percent'].sum().sort_values(by='usage_percent', ascending=False).to_dict(orient="records")
+
+    return {
+        "usage_distribution": usage_distribution,
+        "cumulative_curve": cumulative_curve,
+        "os_version_breakdown": os_version_breakdown
+    }
