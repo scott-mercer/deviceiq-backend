@@ -166,3 +166,5 @@ Icon
 *.swp
 *.swo
 *~
+
+.env
