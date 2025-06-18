@@ -11,6 +11,7 @@ import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
 import os
 from dotenv import load_dotenv
+from typing import Optional
 
 # Load environment variables from .env file
 load_dotenv()
@@ -95,6 +96,48 @@ async def upload_csv(
 
     logging.info(f"Processed upload: {file.filename} | Included: {included_devices}/{total_devices} | Covered usage: {covered_usage:.2f}%")
     return result
+
+@app.post("/analytics/")
+async def analytics(
+    file: UploadFile = File(...),
+    group_by: Optional[str] = Query(None, description="Group devices by 'device_model', 'os_version', or 'os_major_version'"),
+    api_key: str = Depends(verify_api_key)
+):
+    try:
+        content = await file.read()
+        df = pd.read_csv(io.StringIO(content.decode("utf-8")))
+    except Exception as e:
+        logging.error(f"Failed to read CSV: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read CSV file: {str(e)}")
+
+    # Add os_major_version if needed
+    if group_by == "os_major_version":
+        df["os_major_version"] = df["os_version"].astype(str).str.split(".").str[0]
+
+    # Group if requested
+    if group_by in {"device_model", "os_version", "os_major_version"}:
+        group_cols = [group_by]
+        grouped = df.groupby(group_cols, as_index=False).agg({
+            "usage_percent": "sum"
+        })
+        df = grouped
+
+    # Device/OS usage distribution
+    usage_distribution = df.sort_values(by='usage_percent', ascending=False).to_dict(orient="records")
+
+    # Cumulative coverage curve
+    df_sorted = df.sort_values(by='usage_percent', ascending=False)
+    df_sorted['cumulative_coverage'] = df_sorted['usage_percent'].cumsum()
+    cumulative_curve = df_sorted[['device_model', 'os_version', 'usage_percent', 'cumulative_coverage']].to_dict(orient="records")
+
+    # OS version breakdown
+    os_version_breakdown = df.groupby('os_version', as_index=False)['usage_percent'].sum().sort_values(by='usage_percent', ascending=False).to_dict(orient="records")
+
+    return {
+        "usage_distribution": usage_distribution,
+        "cumulative_curve": cumulative_curve,
+        "os_version_breakdown": os_version_breakdown
+    }
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
