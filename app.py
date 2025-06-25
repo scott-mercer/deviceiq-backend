@@ -141,7 +141,8 @@ async def analytics(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger = logging.getLogger("uvicorn.access")
+    # Use a custom logger for structured logs to avoid uvicorn.access formatting issues
+    logger = logging.getLogger("deviceiq")
     logger.info(json.dumps({
         "event": "request",
         "method": request.method,
