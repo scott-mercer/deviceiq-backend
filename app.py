@@ -1,5 +1,5 @@
 # app.py
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Depends, Header, Request
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Depends, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import io
@@ -12,6 +12,7 @@ from sentry_sdk.integrations.logging import LoggingIntegration
 import os
 from dotenv import load_dotenv
 from typing import Optional
+import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
@@ -155,6 +156,23 @@ async def log_requests(request: Request, call_next):
         "url": str(request.url)
     }))
     return response
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        # Example: Replace this with your Appium log process
+        # For now, we simulate log streaming with dummy data
+        for i in range(100):
+            log_line = f"Appium log line {i}"
+            device_info = {"device_id": "emulator-5554", "status": "active"}
+            await websocket.send_json({"log": log_line, "device": device_info})
+            await asyncio.sleep(0.5)  # Simulate log arrival
+    except WebSocketDisconnect:
+        logging.info("WebSocket disconnected")
+    except Exception as e:
+        logging.error(f"WebSocket error: {e}")
+        await websocket.close()
 
 # Prometheus metrics endpoint
 Instrumentator().instrument(app).expose(app)
